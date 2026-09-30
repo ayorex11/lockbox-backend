@@ -1,0 +1,20 @@
+# Calls the protected cleanup endpoint every 10 minutes (deletes expired/revoked/used
+# ciphertext from B2). Add two repository secrets:
+#   LOCKBOX_API_URL   e.g. https://lockbox-api.onrender.com
+#   CLEANUP_SECRET    same value as the CLEANUP_SECRET env var on Render
+name: cleanup
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run cleanup
+        run: |
+          curl --fail --silent --show-error --retry 3 --retry-delay 20 --max-time 120 \
+            -X POST "${{ secrets.LOCKBOX_API_URL }}/internal/cleanup/" \
+            -H "X-Cleanup-Secret: ${{ secrets.CLEANUP_SECRET }}"

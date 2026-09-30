@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.env
+db.sqlite3
+test_db.sqlite3
+staticfiles/
+.venv/
+venv/
+ENV
+ENV/
+.EMV/
+README.md
+lockbox-contract.md

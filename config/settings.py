@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     "accounts",
     "vault",
     "core",
+    "insights",
     'drf_yasg',
 ]
 
@@ -177,6 +178,7 @@ REST_FRAMEWORK = {
         "claim": "10/min",
         "claim_token": "20/min",
         "upload": "30/hour",
+        "admin": "60/min",
     },
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 25,

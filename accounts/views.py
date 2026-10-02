@@ -135,7 +135,10 @@ class LoginView(PublicAPIView):
 
         refresh = RefreshToken.for_user(user)
         response = Response(
-            {"access": str(refresh.access_token), "user": {"email": user.email}}
+            {
+                "access": str(refresh.access_token),
+                "user": {"email": user.email, "is_staff": user.is_staff},
+            }
         )
         set_refresh_cookie(response, str(refresh))
         return response
@@ -186,5 +189,9 @@ class MeView(APIView):
 
     def get(self, request):
         return Response(
-            {"email": request.user.email, "is_email_verified": request.user.is_email_verified}
+            {
+                "email": request.user.email,
+                "is_email_verified": request.user.is_email_verified,
+                "is_staff": request.user.is_staff,
+            }
         )

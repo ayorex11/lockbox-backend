@@ -47,6 +47,10 @@ class UploadThrottle(IPThrottle):
     scope = "upload"
 
 
+class AdminThrottle(IPThrottle):
+    scope = "admin"
+
+
 class ClaimTokenThrottle(SimpleRateThrottle):
     """Caps claim attempts per link regardless of how many IPs the attacker uses."""
 

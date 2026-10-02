@@ -6,6 +6,7 @@ The two properties that matter most:
      one-time link have exactly one winner.
 """
 
+import hashlib
 import logging
 import threading
 from datetime import timedelta
@@ -65,7 +66,9 @@ def log_opened_once(link, request):
     """'opened' fires on the metadata GET, which link previewers also hit. Collapse
     repeat views from the same client within 10 minutes into one event."""
     ident = f"{link.pk}|{get_client_ip(request)}|{truncate_user_agent(request)}"
-    key = "opened:" + str(hash(ident))
+    # hashlib, not hash(): Python's hash() is randomised per process, so with
+    # several gunicorn workers the same visitor would never dedupe.
+    key = "opened:" + hashlib.sha256(ident.encode()).hexdigest()
     if cache.add(key, 1, timeout=600):
         log_event(link, Event.OPENED, request)
 

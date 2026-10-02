@@ -24,5 +24,6 @@ urlpatterns = [
     path("health/", core_views.health),
     path("internal/cleanup/", core_views.cleanup),
     path("api/auth/", include("accounts.urls")),
+    path("api/admin/", include("insights.urls")),
     path("api/", include("vault.urls")),
 ]

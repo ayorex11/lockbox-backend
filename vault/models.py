@@ -116,7 +116,11 @@ class AuditEvent(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        indexes = [models.Index(fields=["link", "-created_at"])]
+        indexes = [
+            models.Index(fields=["link", "-created_at"]),
+            # Admin dashboard: counts and daily series filtered by type and date.
+            models.Index(fields=["event_type", "created_at"], name="audit_type_created_idx"),
+        ]
         ordering = ["-created_at", "-id"]
 
     def __str__(self):

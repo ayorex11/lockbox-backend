@@ -11,3 +11,5 @@ ENV/
 .EMV/
 README.md
 lockbox-contract.md
+set_b2_cors.py
+smoke_test.py

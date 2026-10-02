@@ -128,7 +128,8 @@ class OverviewTests(AdminTestCase):
         link = self.make_link(staff)
         self.event(link, Event.OPENED)
         self.event(link, Event.CLAIMED)
-        data = self.staff_client().get("/api/admin/overview/").json()
+        # reuse the staff user above: staff_client() would create a second boss@example.com
+        data = self.auth_client(staff).get("/api/admin/overview/").json()
         self.assertEqual(data["links"]["total"], 0)
         self.assertEqual(data["engagement"]["claims"], 0)
         self.assertEqual(data["engagement"]["opens"], 0)

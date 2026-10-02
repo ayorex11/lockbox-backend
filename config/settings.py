@@ -33,6 +33,13 @@ def env_list(name, default=""):
 # --------------------------------------------------------------------------- core
 DEBUG = env_bool("DEBUG", False)
 
+# Django admin lives at a configurable path. Set ADMIN_URL to something unguessable in
+# production (e.g. "ops-7f3k2x/"), so the default /admin/ doesn't exist.
+ADMIN_URL = env("ADMIN_URL", "admin/").strip("/") + "/"
+# Swagger/Redoc are for development. In production they are OFF unless explicitly enabled,
+# and even then only a logged-in staff user (Django admin session) can open them.
+ENABLE_API_DOCS = env_bool("ENABLE_API_DOCS", DEBUG)
+
 SECRET_KEY = env("SECRET_KEY")
 if not SECRET_KEY:
     if DEBUG:
@@ -152,6 +159,10 @@ REFRESH_COOKIE_SECURE = env_bool("REFRESH_COOKIE_SECURE", not DEBUG)
 REFRESH_COOKIE_PATH = "/api/auth/"
 
 EMAIL_VERIFICATION_MAX_AGE_SECONDS = env_int("EMAIL_VERIFICATION_MAX_AGE_SECONDS", 60 * 60 * 48)
+PASSWORD_RESET_MAX_AGE_SECONDS = env_int("PASSWORD_RESET_MAX_AGE_SECONDS", 60 * 60)
+# Send account emails from a background thread so response time doesn't reveal whether an
+# address is registered. Tests turn this off.
+EMAIL_SEND_ASYNC = env_bool("EMAIL_SEND_ASYNC", True)
 LOGIN_MAX_ATTEMPTS = env_int("LOGIN_MAX_ATTEMPTS", 5)
 LOGIN_LOCK_SECONDS = env_int("LOGIN_LOCK_SECONDS", 15 * 60)
 
@@ -194,17 +205,32 @@ CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS", "")
 # Number of reverse proxies in front of Django whose X-Forwarded-For entry we trust.
 # Render: verify with a test request (see README) before relying on audit-log IPs.
 TRUSTED_PROXY_COUNT = env_int("TRUSTED_PROXY_COUNT", 1 if not DEBUG else 0)
+# Header a TRUSTED edge proxy sets to the real client address, e.g. "CF-Connecting-IP" on
+# Render (which sits behind Cloudflare). Preferred over X-Forwarded-For when present and
+# valid, because Render's proxy APPENDS to X-Forwarded-For, so no fixed
+# TRUSTED_PROXY_COUNT is reliable. Verify with /internal/whoami/ (see README).
+CLIENT_IP_HEADER = env("CLIENT_IP_HEADER", "")
 
 # -------------------------------------------------------------------- vault rules
 MAX_UPLOAD_BYTES = env_int("MAX_UPLOAD_BYTES", 25 * 1024 * 1024)  # ciphertext size
 MAX_ACTIVE_FILES_PER_USER = env_int("MAX_ACTIVE_FILES_PER_USER", 25)
+LINK_PASSWORD_MIN_LENGTH = env_int("LINK_PASSWORD_MIN_LENGTH", 8)
 LINK_PASSWORD_MAX_ATTEMPTS = env_int("LINK_PASSWORD_MAX_ATTEMPTS", 5)
 LINK_LOCK_SECONDS = env_int("LINK_LOCK_SECONDS", 15 * 60)
+# After this many lockouts the link is revoked and its file deleted: someone holding the
+# link is guessing, and a few dozen guesses total is all they should ever get.
+LINK_MAX_LOCKOUTS = env_int("LINK_MAX_LOCKOUTS", 3)
 UPLOAD_URL_TTL_SECONDS = env_int("UPLOAD_URL_TTL_SECONDS", 15 * 60)
 CLAIM_URL_TTL_SECONDS = env_int("CLAIM_URL_TTL_SECONDS", 60)
-# After a claim, wait this long before deleting the object so the download can finish.
-ONE_TIME_DELETE_DELAY_SECONDS = env_int("ONE_TIME_DELETE_DELAY_SECONDS", 90)
-CLAIM_GRACE_SECONDS = env_int("CLAIM_GRACE_SECONDS", 120)
+# A failed download can be retried with the secret token returned by the claim, for this
+# long and at most this many times. No counter is consumed by a retry.
+CLAIM_REISSUE_SECONDS = env_int("CLAIM_REISSUE_SECONDS", 120)
+CLAIM_REISSUE_MAX = env_int("CLAIM_REISSUE_MAX", 3)
+# The object must outlive the last possible retry plus the life of the URL it hands out,
+# so both the delayed delete and the cleanup job's grace default to that sum + margin.
+_object_lifetime = CLAIM_REISSUE_SECONDS + CLAIM_URL_TTL_SECONDS + 20
+ONE_TIME_DELETE_DELAY_SECONDS = env_int("ONE_TIME_DELETE_DELAY_SECONDS", _object_lifetime)
+CLAIM_GRACE_SECONDS = env_int("CLAIM_GRACE_SECONDS", _object_lifetime)
 PENDING_UPLOAD_MAX_AGE_SECONDS = env_int("PENDING_UPLOAD_MAX_AGE_SECONDS", 60 * 60)
 CLEANUP_SECRET = env("CLEANUP_SECRET", "")
 

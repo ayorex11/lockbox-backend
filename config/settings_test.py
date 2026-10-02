@@ -21,7 +21,7 @@ DATABASES = {
         "NAME": BASE_DIR / "db_for_tests.sqlite3",
         # File-backed test DB so the threaded concurrency test shares one database.
         "TEST": {"NAME": BASE_DIR / "test_db.sqlite3"},
-        "OPTIONS": {"timeout": 30},
+        "OPTIONS": {"timeout": 30, "transaction_mode": "IMMEDIATE"},
     }
 }
 
@@ -41,3 +41,8 @@ CORS_ALLOWED_ORIGINS = ["https://app.lockbox.test"]
 CLEANUP_SECRET = "test-cleanup-secret"
 B2_BUCKET_NAME = "test-bucket"
 EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
+
+EMAIL_SEND_ASYNC = False
+CLIENT_IP_HEADER = ""
+ENABLE_API_DOCS = True
+ADMIN_URL = "admin/"

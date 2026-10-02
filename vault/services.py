@@ -7,13 +7,15 @@ The two properties that matter most:
 """
 
 import hashlib
+import hmac
 import logging
+import secrets
 import threading
 from datetime import timedelta
 
 from django.conf import settings
 from django.core.cache import cache
-from django.db import close_old_connections
+from django.db import close_old_connections, transaction
 from django.db.models import F, Q
 from django.utils import timezone
 from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
@@ -97,23 +99,63 @@ def _locked_seconds(link, now):
     return 0
 
 
-def _register_password_failure(link, now, request):
-    ShareLink.objects.filter(pk=link.pk).update(failed_attempts=F("failed_attempts") + 1)
-    link.refresh_from_db(fields=["failed_attempts"])
+def _reserve_password_attempt(link_id, now):
+    """Count a password attempt BEFORE the password is checked.
+
+    The row is locked while we read and bump the counter, so parallel requests can't all
+    pass the "not locked yet" check and each get a free guess: at most
+    LINK_PASSWORD_MAX_ATTEMPTS passwords are ever verified per lock window, however many
+    requests arrive at once. The attempt that reaches the limit sets the lock up front
+    (a successful password clears it again), so everything after it is refused.
+    Returns the attempt number (1-based).
+    """
+    limit = settings.LINK_PASSWORD_MAX_ATTEMPTS
+    with transaction.atomic():
+        row = ShareLink.objects.select_for_update().get(pk=link_id)
+        remaining = _locked_seconds(row, now)
+        if remaining:
+            raise LinkLocked(remaining)
+        if row.locked_until:  # a previous lock has run out: start a fresh window
+            row.failed_attempts = 0
+            row.locked_until = None
+        row.failed_attempts += 1
+        if row.failed_attempts >= limit:
+            row.locked_until = now + timedelta(seconds=settings.LINK_LOCK_SECONDS)
+        row.save(update_fields=["failed_attempts", "locked_until"])
+        return row.failed_attempts
+
+
+def _register_password_failure(link, attempt, request):
+    """Always raises: WrongPassword, or LinkLocked once the attempt limit is reached."""
     log_event(link, Event.PASSWORD_FAILED, request)
     limit = settings.LINK_PASSWORD_MAX_ATTEMPTS
-    if link.failed_attempts >= limit:
-        ShareLink.objects.filter(pk=link.pk).update(
-            failed_attempts=0,
-            locked_until=now + timedelta(seconds=settings.LINK_LOCK_SECONDS),
-        )
-        log_event(link, Event.LOCKED_OUT, request)
-        raise LinkLocked(settings.LINK_LOCK_SECONDS)
-    raise WrongPassword(limit - link.failed_attempts)
+    if attempt < limit:
+        raise WrongPassword(limit - attempt)
+
+    # This was the last allowed attempt: the lock is already set. Count the lockout, and
+    # kill the link if someone keeps coming back to guess.
+    ShareLink.objects.filter(pk=link.pk).update(lockout_count=F("lockout_count") + 1)
+    link.refresh_from_db(fields=["lockout_count"])
+    log_event(link, Event.LOCKED_OUT, request)
+    if link.lockout_count >= settings.LINK_MAX_LOCKOUTS:
+        revoke_link(link, request, event=Event.AUTO_REVOKED)
+    raise LinkLocked(settings.LINK_LOCK_SECONDS)
+
+
+def _hash_reissue_token(raw):
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+class ClaimGrant:
+    """What a successful claim hands back: the download URL plus the retry secret."""
+
+    def __init__(self, url, reissue_token):
+        self.url = url
+        self.reissue_token = reissue_token
 
 
 def claim(link_id, password, request):
-    """Run the full claim sequence and return a short-lived presigned download URL.
+    """Run the full claim sequence and return a ClaimGrant (short-lived presigned URL).
 
     Order matters: existence -> status -> lock -> password -> atomic consume.
     Raises LinkGone, LinkLocked, PasswordRequired or WrongPassword.
@@ -134,10 +176,10 @@ def claim(link_id, password, request):
     if link.requires_password:
         if not password:
             raise PasswordRequired()
+        attempt = _reserve_password_attempt(link.pk, now)
         if not link.check_link_password(password):
-            _register_password_failure(link, now, request)  # always raises
-        if link.failed_attempts:
-            ShareLink.objects.filter(pk=link.pk).update(failed_attempts=0)
+            _register_password_failure(link, attempt, request)  # always raises
+        ShareLink.objects.filter(pk=link.pk).update(failed_attempts=0, locked_until=None)
 
     if not consume(link, now):
         link.refresh_from_db()
@@ -146,10 +188,49 @@ def claim(link_id, password, request):
     log_event(link, Event.CLAIMED, request)
     url = storage.presign_get(link.file.storage_key, settings.CLAIM_URL_TTL_SECONDS)
 
+    # Only the winner of the atomic consume gets here, so only one caller holds the token.
+    raw_token = secrets.token_urlsafe(24)
+    ShareLink.objects.filter(pk=link.pk).update(
+        reissue_hash=_hash_reissue_token(raw_token),
+        reissue_expires_at=now + timedelta(seconds=settings.CLAIM_REISSUE_SECONDS),
+        reissue_count=0,
+    )
+
     link.refresh_from_db(fields=["consumed_at", "download_count", "max_downloads", "revoked_at"])
     if link.compute_status(now) == Status.USED:
         schedule_object_deletion(link.file_id, settings.ONE_TIME_DELETE_DELAY_SECONDS)
-    return url
+    return ClaimGrant(url, raw_token)
+
+
+def reissue(link_id, reissue_token, request):
+    """Hand out a fresh download URL for a claim whose download failed midway.
+
+    No download is counted. Needs the secret returned by the claim, so someone who merely
+    holds the link can't use it, and works only briefly and a few times. Any failure raises
+    LinkGone (one answer for every reason, so nothing leaks).
+    """
+    now = timezone.now()
+    link = ShareLink.objects.select_related("file").filter(pk=link_id).first()
+    if (
+        link is None
+        or not link.reissue_hash
+        or link.revoked_at is not None
+        or link.file.status != File.Status.READY
+        or link.reissue_expires_at is None
+        or now > link.reissue_expires_at
+        or not isinstance(reissue_token, str)
+        or not hmac.compare_digest(_hash_reissue_token(reissue_token), link.reissue_hash)
+    ):
+        raise LinkGone("unavailable")
+
+    # Bump the counter conditionally so parallel retries can't exceed the cap.
+    updated = ShareLink.objects.filter(
+        pk=link.pk, reissue_hash=link.reissue_hash, reissue_count__lt=settings.CLAIM_REISSUE_MAX
+    ).update(reissue_count=F("reissue_count") + 1)
+    if not updated:
+        raise LinkGone("unavailable")
+    log_event(link, Event.REISSUED, request)
+    return storage.presign_get(link.file.storage_key, settings.CLAIM_URL_TTL_SECONDS)
 
 
 # --------------------------------------------------------------- deleting objects
@@ -186,12 +267,12 @@ def schedule_object_deletion(file_id, delay):
 
 
 # ------------------------------------------------------------------------ revoke
-def revoke_link(link, request):
+def revoke_link(link, request, event=Event.REVOKED):
     """Idempotent. Marks the link revoked and deletes the ciphertext."""
     now = timezone.now()
     updated = ShareLink.objects.filter(pk=link.pk, revoked_at__isnull=True).update(revoked_at=now)
     if updated:
-        log_event(link, Event.REVOKED, request)
+        log_event(link, event, request)
     file = link.file
     if file.status != File.Status.DELETED:
         try:

@@ -1,6 +1,6 @@
 from rest_framework.throttling import SimpleRateThrottle
 
-from .utils import get_client_ip
+from .utils import get_client_ip, rate_limit_ident
 
 
 class IPThrottle(SimpleRateThrottle):
@@ -9,7 +9,7 @@ class IPThrottle(SimpleRateThrottle):
     scope = None
 
     def get_ident(self, request):
-        return get_client_ip(request) or "unknown"
+        return rate_limit_ident(get_client_ip(request))
 
     def get_cache_key(self, request, view):
         return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}

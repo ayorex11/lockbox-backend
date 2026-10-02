@@ -63,7 +63,7 @@ class LinkClaimView(RecipientView):
         if password is not None and not isinstance(password, str):
             return Response({"detail": "invalid_password"}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            url = services.claim(token, password, request)
+            grant = services.claim(token, password, request)
         except LinkGone as exc:
             return gone_response(exc.reason)
         except LinkLocked as exc:
@@ -78,4 +78,25 @@ class LinkClaimView(RecipientView):
                 {"detail": "wrong_password", "attempts_left": exc.attempts_left},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
+        return Response(
+            {
+                "download_url": grant.url,
+                "expires_in": settings.CLAIM_URL_TTL_SECONDS,
+                # Secret for retrying a failed download; keep it in memory only.
+                "reissue_token": grant.reissue_token,
+            }
+        )
+
+
+class LinkReissueView(RecipientView):
+    """Retry a download that failed after a successful claim. Consumes nothing."""
+
+    throttle_classes = [GlobalIPThrottle, ClaimIPThrottle, ClaimTokenThrottle]
+
+    def post(self, request, token):
+        reissue_token = request.data.get("reissue_token") if isinstance(request.data, dict) else None
+        try:
+            url = services.reissue(token, reissue_token, request)
+        except LinkGone:
+            return gone_response("unavailable")
         return Response({"download_url": url, "expires_in": settings.CLAIM_URL_TTL_SECONDS})

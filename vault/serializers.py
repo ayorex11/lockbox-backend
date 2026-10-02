@@ -3,6 +3,8 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth.hashers import make_password
+from django.contrib.auth.password_validation import CommonPasswordValidator
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
 from .models import AuditEvent, File, ShareLink
@@ -35,9 +37,19 @@ class LinkCreateSerializer(serializers.Serializer):
         min_value=1, max_value=100, required=False, allow_null=True
     )
     password = serializers.CharField(
-        min_length=6, max_length=128, required=False, trim_whitespace=False, write_only=True
+        max_length=128, required=False, trim_whitespace=False, write_only=True
     )
     show_sender_email = serializers.BooleanField(required=False, default=True)
+
+    def validate_password(self, value):
+        # Anyone holding the link can guess, so refuse the passwords guessers try first.
+        if len(value) < settings.LINK_PASSWORD_MIN_LENGTH:
+            raise serializers.ValidationError("password_too_short")
+        try:
+            CommonPasswordValidator().validate(value)
+        except DjangoValidationError:
+            raise serializers.ValidationError("password_too_common") from None
+        return value
 
     def validate(self, attrs):
         if attrs["mode"] == ShareLink.Mode.ONE_TIME and attrs.get("max_downloads") is not None:

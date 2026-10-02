@@ -11,4 +11,5 @@ urlpatterns = [
     path("links/<slug:pk>/revoke/", views.LinkRevokeView.as_view()),
     path("s/<slug:token>/", recipient_views.LinkMetaView.as_view()),
     path("s/<slug:token>/claim/", recipient_views.LinkClaimView.as_view()),
+    path("s/<slug:token>/reissue/", recipient_views.LinkReissueView.as_view()),
 ]

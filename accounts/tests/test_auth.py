@@ -18,12 +18,14 @@ class AuthTests(TestCase):
         cache.clear()
         self.client = APIClient()
 
-    def register(self, email="ayo@example.com", password=GOOD_PASSWORD):
-        return self.client.post("/api/auth/register", {"email": email, "password": password}, format="json")
+    def register(self, email="ayo@example.com"):
+        return self.client.post("/api/auth/register", {"email": email}, format="json")
 
-    def verify(self, user):
+    def verify(self, user, password=GOOD_PASSWORD):
         return self.client.post(
-            "/api/auth/verify-email", {"token": make_verification_token(user)}, format="json"
+            "/api/auth/verify-email",
+            {"token": make_verification_token(user), "password": password},
+            format="json",
         )
 
     def login(self, email="ayo@example.com", password=GOOD_PASSWORD):
@@ -48,10 +50,10 @@ class AuthTests(TestCase):
         self.assertEqual(fresh.status_code, existing.status_code)
         self.assertEqual(fresh.json(), existing.json())
 
-    def test_register_does_not_overwrite_existing_password(self):
+    def test_register_does_not_touch_an_existing_account(self):
         user = self.verified_user()
         old_hash = user.password
-        self.register("ayo@example.com", "another-pass-77")
+        self.register("ayo@example.com")
         user.refresh_from_db()
         self.assertEqual(user.password, old_hash)
 
@@ -59,16 +61,34 @@ class AuthTests(TestCase):
         self.register("Ayo@Example.COM")
         self.assertTrue(User.objects.filter(email="ayo@example.com").exists())
 
-    def test_weak_passwords_rejected(self):
+    def test_weak_passwords_rejected_when_verifying(self):
+        self.register("x@example.com")
+        user = User.objects.get(email="x@example.com")
         for bad in ["short1", "onlyletterslongenough", "12345678901234", "password123456"]:
-            self.assertEqual(self.register("x@example.com", bad).status_code, 400, bad)
+            response = self.verify(user, bad)
+            self.assertEqual(response.status_code, 400, bad)
+            self.assertIn("password", response.json())
+        user.refresh_from_db()
+        self.assertFalse(user.is_email_verified)  # a rejected password verifies nothing
 
-    def test_verify_email_flow(self):
+    def test_verify_email_flow_sets_the_password_and_allows_login(self):
         self.register()
         user = User.objects.get(email="ayo@example.com")
+        self.assertFalse(user.has_usable_password())
+        self.assertEqual(self.login().status_code, 401)  # no password exists yet
         self.assertEqual(self.verify(user).status_code, 200)
         user.refresh_from_db()
         self.assertTrue(user.is_email_verified)
+        self.assertEqual(self.login().status_code, 200)
+
+    def test_verification_link_works_only_once(self):
+        self.register()
+        user = User.objects.get(email="ayo@example.com")
+        self.assertEqual(self.verify(user, "first-Password-1").status_code, 200)
+        again = self.verify(user, "attacker-Password-2")
+        self.assertEqual(again.status_code, 400)
+        self.assertEqual(self.login(password="first-Password-1").status_code, 200)
+        self.assertEqual(self.login(password="attacker-Password-2").status_code, 401)
 
     def test_verify_email_rejects_garbage_and_tampered_tokens(self):
         for token in ["nonsense", make_verification_token(User(pk=999, email="x@y.com"))]:

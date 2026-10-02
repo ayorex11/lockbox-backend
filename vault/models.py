@@ -61,6 +61,11 @@ class ShareLink(models.Model):
     password_hash = models.CharField(max_length=256, blank=True, default="")
     failed_attempts = models.PositiveSmallIntegerField(default=0)
     locked_until = models.DateTimeField(null=True, blank=True)
+    lockout_count = models.PositiveSmallIntegerField(default=0)
+    # Retry window after a claim: only the claimer holds the secret behind reissue_hash.
+    reissue_hash = models.CharField(max_length=64, blank=True, default="")
+    reissue_expires_at = models.DateTimeField(null=True, blank=True)
+    reissue_count = models.PositiveSmallIntegerField(default=0)
     consumed_at = models.DateTimeField(null=True, blank=True)  # one_time only
     last_claimed_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
@@ -107,6 +112,8 @@ class AuditEvent(models.Model):
         LOCKED_OUT = "locked_out"
         CLAIMED = "claimed"
         REVOKED = "revoked"
+        AUTO_REVOKED = "auto_revoked"  # too many password lockouts
+        REISSUED = "reissued"  # download URL re-issued after a failed download
         EXPIRED_CLEANUP = "expired_cleanup"
 
     link = models.ForeignKey(ShareLink, on_delete=models.CASCADE, related_name="events")

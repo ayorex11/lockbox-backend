@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.core.cache import cache
 from django.contrib.auth.hashers import check_password, make_password
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -6,6 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from rest_framework_simplejwt.tokens import RefreshToken
 from drf_yasg.utils import swagger_auto_schema
 
@@ -19,15 +21,18 @@ from core.throttles import (
 
 from . import lockout
 from .cookies import clear_refresh_cookie, enforce_trusted_origin, set_refresh_cookie
-from .emails import send_verification_email
+from .emails import send_password_reset_email, send_verification_email
 from .models import User
 from .serializers import (
+    ForgotPasswordSerializer,
     LoginSerializer,
     RegisterSerializer,
     ResendVerificationSerializer,
+    ResetPasswordSerializer,
     VerifyEmailSerializer,
+    check_new_password,
 )
-from .tokens import read_verification_token
+from .tokens import read_reset_token, read_verification_token, reset_token_matches
 
 _dummy_hash = None
 
@@ -46,33 +51,39 @@ class PublicAPIView(APIView):
     permission_classes = [AllowAny]
 
 
+def _may_email(kind, email, cooldown=60):
+    """One email of each kind per address per minute, so the forms can't be used to flood
+    someone's inbox. The caller still returns the normal response when this says no."""
+    return cache.add(f"mail:{kind}:{email}", 1, timeout=cooldown)
+
+
 class RegisterView(PublicAPIView):
     throttle_classes = [GlobalIPThrottle, RegisterThrottle]
-    @swagger_auto_schema(request_body=RegisterSerializer)
 
+    @swagger_auto_schema(request_body=RegisterSerializer)
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         email = serializer.validated_data["email"]
-        password = serializer.validated_data["password"]
 
         user = User.objects.filter(email=email).first()
         if user is None:
-            user = User.objects.create_user(email=email, password=password)
+            # No usable password yet: it is set when the owner opens the emailed link.
+            user = User(email=email)
+            user.set_unusable_password()
+            user.save()
+        if not user.is_email_verified and _may_email("verify", email):
             send_verification_email(user)
-        else:
-            _burn_password_check(password)
-            if not user.is_email_verified:
-                # Never touch the existing password; just re-send the link.
-                send_verification_email(user)
         # Identical response whether or not the address was already registered.
         return Response({"detail": "verification_email_sent"}, status=status.HTTP_202_ACCEPTED)
 
 
 class VerifyEmailView(PublicAPIView):
-    throttle_classes = [GlobalIPThrottle, RefreshThrottle]
-    @swagger_auto_schema(request_body=VerifyEmailSerializer)
+    """Confirms the address AND sets the password. The link works once."""
 
+    throttle_classes = [GlobalIPThrottle, RefreshThrottle]
+
+    @swagger_auto_schema(request_body=VerifyEmailSerializer)
     def post(self, request):
         serializer = VerifyEmailSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -80,11 +91,14 @@ class VerifyEmailView(PublicAPIView):
         user = None
         if payload:
             user = User.objects.filter(pk=payload.get("uid"), email=payload.get("email")).first()
-        if user is None:
+        if user is None or user.is_email_verified or not user.is_active:
             return Response({"detail": "invalid_or_expired_token"}, status=status.HTTP_400_BAD_REQUEST)
-        if not user.is_email_verified:
-            user.is_email_verified = True
-            user.save(update_fields=["is_email_verified"])
+
+        password = serializer.validated_data["password"]
+        check_new_password(password, user)
+        user.set_password(password)
+        user.is_email_verified = True
+        user.save(update_fields=["password", "is_email_verified"])
         return Response({"detail": "verified"})
 
 
@@ -98,9 +112,48 @@ class ResendVerificationView(PublicAPIView):
         user = User.objects.filter(
             email=serializer.validated_data["email"], is_email_verified=False, is_active=True
         ).first()
-        if user:
+        if user and _may_email("verify", user.email):
             send_verification_email(user)
         return Response({"detail": "verification_email_sent"}, status=status.HTTP_202_ACCEPTED)
+
+
+class ForgotPasswordView(PublicAPIView):
+    throttle_classes = [GlobalIPThrottle, ResendThrottle]
+
+    @swagger_auto_schema(request_body=ForgotPasswordSerializer)
+    def post(self, request):
+        serializer = ForgotPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"]
+        user = User.objects.filter(email=email, is_email_verified=True, is_active=True).first()
+        if user and _may_email("reset", email):
+            send_password_reset_email(user)
+        return Response({"detail": "reset_email_sent"}, status=status.HTTP_202_ACCEPTED)
+
+
+class ResetPasswordView(PublicAPIView):
+    throttle_classes = [GlobalIPThrottle, RefreshThrottle]
+
+    @swagger_auto_schema(request_body=ResetPasswordSerializer)
+    def post(self, request):
+        serializer = ResetPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payload = read_reset_token(serializer.validated_data["token"])
+        user = None
+        if payload:
+            user = User.objects.filter(pk=payload.get("uid"), is_active=True).first()
+        if user is None or not user.is_email_verified or not reset_token_matches(user, payload):
+            return Response({"detail": "invalid_or_expired_token"}, status=status.HTTP_400_BAD_REQUEST)
+
+        password = serializer.validated_data["password"]
+        check_new_password(password, user)
+        user.set_password(password)
+        user.save(update_fields=["password"])
+        # Whoever had the old password must not keep a session: end every refresh token.
+        for outstanding in OutstandingToken.objects.filter(user=user):
+            BlacklistedToken.objects.get_or_create(token=outstanding)
+        lockout.clear(user.email)
+        return Response({"detail": "password_reset"})
 
 
 class LoginView(PublicAPIView):
